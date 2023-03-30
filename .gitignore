@@ -1,2 +1,5 @@
 node_modules/**/*
 dump.rdb
+logs/*
+*.env
+*.config.env
