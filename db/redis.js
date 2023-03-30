@@ -1,15 +1,43 @@
 import { createClient } from 'redis';
 import { promisify } from 'util';
 
+const Logger = require('../helpers/logger');
+
+const logger = new Logger('server');
+
 class RedisClient {
   constructor() {
-    this.client = createClient();
+    this.client = null;
+    this.clientGet = null;
+  }
 
-    this.client.on('error', (err) => {
-      console.log(`ERROR: ${err}`);
+  async connect() {
+    try {
+      this.client = createClient();
+
+      this.client.on('error', (err) => {
+        logger.error(`ERROR: ${err}`);
+      });
+
+      this.clientGet = promisify(this.client.get).bind(this.client);
+    } catch (err) {
+      logger.error(`Error connecting to Redis: ${err}`);
+      throw err;
+    }
+  }
+
+  async close() {
+    return new Promise((resolve, reject) => {
+      this.client.quit((err) => {
+        if (err) {
+          logger.error(`Error closing Redis connection: ${err}`);
+          reject(err);
+        } else {
+          logger.info('Redis connection closed.');
+          resolve();
+        }
+      });
     });
-
-    this.clientGet = promisify(this.client.get).bind(this.client);
   }
 
   isAlive() {
