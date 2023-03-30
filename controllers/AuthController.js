@@ -17,6 +17,24 @@ const redisClient = require('../db/redis');
 const generateJWToken = require('../helpers/generateJWToken');
 const verificationPin = require('../helpers/verificationPin');
 const verificationToken = require('../helpers/verificationToken');
+const setAuthCookie = require('../helpers/setAuthCookie');
+const clearAuthCookie = require('../helpers/clearAuthCookie');
+const Logger = require('../helpers/logger');
+
+const logger = new Logger('info-auth');
+const HttpStatus = {
+  OK: 200,
+  CREATED: 201,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  SERVER_ERROR: 500,
+};
+const cacheDuration = {
+  FIVE_MINUTES: 5 * 60,
+  ONE_HOUR: 60 * 60,
+};
 
 class AuthController {
   static async signup(req, res, next) {
@@ -30,39 +48,45 @@ class AuthController {
         passwordConfirmation: req.body.passwordConfirmation,
       });
 
-      let token = verificationPin();
-      sendPhoneRegistrationPin(newCustomer.phoneNumber, token);
+      const phonePin = verificationPin();
       await redisClient.set(
-        `phoneNumber_${token}`,
+        `phoneNumber_${phonePin}`,
         newCustomer.phoneNumber.toString(),
-        300
+        cacheDuration.FIVE_MINUTES
       );
+      sendPhoneRegistrationPin(newCustomer.phoneNumber, phonePin);
 
-      token = verificationPin();
-      await redisClient.set(`Email_${token}`, newCustomer._id.toString(), 300);
+      const emailPin = verificationPin();
+      await redisClient.set(
+        `Email_${emailPin}`,
+        newCustomer._id.toString(),
+        cacheDuration.FIVE_MINUTES
+      );
       await sendEmailRegistrationPin(
         newCustomer.email,
         'Email Verification',
         {
           name: newCustomer.firstName,
-          token,
+          token: emailPin,
         },
         './template/pinVerification.handlebars'
       );
 
-      return res.status(201).json({
+      logger.setLogData(req.body);
+      logger.info(`User created with email: ${newCustomer.email}`);
+      return res.status(HttpStatus.CREATED).json({
         status: 'success',
         data: formatResponse(newCustomer),
       });
-    } catch (err) {
-      let errors;
-      if (err.name === 'ValidationError') {
-        errors = handleValidationError(err, req);
-        return res.status(400).json({
+    } catch (error) {
+      if (error.name === 'ValidationError') {
+        logger.warn(`Validation error: ${error.message}`);
+        let errors = handleValidationError(error, req);
+        return res.status(HttpStatus.BAD_REQUEST).json({
           error: { ...errors },
         });
       }
-      return next(err);
+      return next(error);
     }
   }
 
@@ -70,36 +94,33 @@ class AuthController {
     const { email, password } = req.body;
     try {
       if (!email || !password) {
-        return next(new AppError('Invalid login credentials', 400));
+        return next(new AppError('Invalid login credentials', HttpStatus.BAD_REQUEST));
       }
       let customer = await Customer.findOne({ email });
       if (!customer) {
-        return next(new AppError('Customer not found', 404));
+        return next(new AppError('Customer not found', HttpStatus.NOT_FOUND));
       }
       if (customer.isVerified === false) {
         return next(
           new AppError(
             'Kindly verify your email, using /verify/token route',
-            404
+            HttpStatus.NOT_FOUND
           )
         );
       }
       customer = await Customer.findOne({ email, password: sha1(password) });
       if (!customer) {
-        return next(new AppError('Invalid login credentials', 400));
+        return next(new AppError('Invalid login credentials', HttpStatus.BAD_REQUEST));
       }
       const token = generateJWToken(customer._id.toString());
-      await redisClient.set(`auth_${token}`, customer._id.toString(), 60 * 60);
-      res.cookie('token', token, {
-        maxAge: 60 * 60,
-        httpOnly: true,
-        sameSite: 'none',
-      });
+      await redisClient.set(`auth_${token}`, customer._id.toString(), cacheDuration.ONE_HOUR);
+      setAuthCookie(res, token);
+      logger.info(`User logged in with email: ${email}`);
       return res
-        .status(200)
+        .status(HttpStatus.OK)
         .send({ token, customer: formatResponse(customer) });
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 
@@ -107,29 +128,34 @@ class AuthController {
     try {
       const { authorization } = req.headers;
       if (!authorization || !authorization.startsWith('Bearer ')) {
-        return next(new AppError('Unauthorised', 401));
+        return next(new AppError(
+            'Unauthorized: Missing or invalid token format',
+            HttpStatus.UNAUTHORIZED
+            )
+        );
       }
       const token = authorization.split(' ')[1];
       if (token === undefined) {
-        return next(new AppError('Unauthorised', 401));
+        return next(new AppError('Unauthorized: Token not found', HttpStatus.UNAUTHORIZED));
       }
       const valid = await redisClient.get(`auth_${token}`);
       if (valid === null) {
-        return next(new AppError('Forbidden', 403));
+        return next(new AppError('Forbidden: Token not active or expired', HttpStatus.FORBIDDEN));
       }
       const user = jwt.verify(token, process.env.JWT_SECRET);
       if (valid !== user.customerId) {
-        return next(new AppError('Forbidden', 403));
+        return next(new AppError('Forbidden: Token does not match the user', HttpStatus.FORBIDDEN));
       }
       await redisClient.del(`auth_${token}`);
-      res.status(200).end();
-      res.cookie('token', 'loggedout', { maxAge: 10 });
+      clearAuthCookie(res);
+      logger.info(`User logged out with token: ${token}`);
+      res.status(HttpStatus.OK).end();
     } catch (error) {
       if (error.message === 'invalid signature') {
-        return next(new AppError('Unauthorised', 401));
+        return next(new AppError('Unauthorised: Invalid token signature', HttpStatus.UNAUTHORIZED));
       }
       if (error.message === 'jwt malformed') {
-        return next(new AppError('Server error...', 500));
+        return next(new AppError(`Server error: ${error.message}`, HttpStatus.SERVER_ERROR));
       }
       return next(error);
     }
@@ -138,18 +164,18 @@ class AuthController {
   static async protect(req, res, next) {
     let token;
     const { authorization } = req.headers;
-    if (authorization || authorization.startsWith('Bearer ')) {
+    if (authorization && authorization.startsWith('Bearer ')) {
       token = authorization.split(' ')[1];
     } else if (req.cookies.jwt) {
       token = req.cookies.jwt;
     }
     if (!token) {
-      return next(new AppError('Unauthorised', 401));
+      return next(new AppError('Unauthorised: Missing token', HttpStatus.UNAUTHORIZED));
     }
     try {
       const valid = await redisClient.get(`auth_${token}`);
       if (valid === null) {
-        return next(new AppError('Forbidden', 403));
+        return next(new AppError('Forbidden: Invalid or expired token', HttpStatus.FORBIDDEN));
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -157,22 +183,23 @@ class AuthController {
         _id: decoded.customerId,
       });
       if (!CurrentCustomer) {
-        return next(new AppError('Unauthorised', 401));
+        return next(new AppError('Unauthorised: User not found', HttpStatus.UNAUTHORIZED));
       }
       if (CurrentCustomer.passwordChangeAfter(decoded.iat)) {
         return next(
-          new AppError('Password recently changed. Kindly login again!', 401)
+          new AppError('Password recently changed. Kindly login again!', HttpStatus.UNAUTHORIZED)
         );
       }
       req.user = formatResponse(CurrentCustomer);
       req.headers.user = formatResponse(CurrentCustomer);
+      logger.info(`Access granted for user: ${CurrentCustomer._id}`);
       next();
     } catch (error) {
       if (error.message === 'invalid signature') {
-        return next(new AppError('Unauthorised', 401));
+        return next(new AppError('Unauthorised: Invalid token signature', HttpStatus.UNAUTHORIZED));
       }
       if (error.message === 'jwt malformed') {
-        return next(new AppError('Server error...', 500));
+        return next(new AppError(`Server error: ${error.message}`, HttpStatus.SERVER_ERROR));
       }
       return next(error);
     }
@@ -184,7 +211,7 @@ class AuthController {
       const customer = await Customer.findOne({ email });
       if (!customer) {
         return next(
-          new AppError('Customer with that email does not exist', 404)
+          new AppError('Customer with that email does not exist', HttpStatus.NOT_FOUND)
         );
       }
       const token = redisClient.get(`Reset_${customer._id.toString()}`);
@@ -193,7 +220,7 @@ class AuthController {
       await redisClient.set(
         `Reset_${customer._id.toString()}`,
         resetToken,
-        3600
+        cacheDuration.ONE_HOUR
       );
 
       const link = `${process.env.BASE_URL}/confirmResetPassword?token=${resetToken}&id=${customer._id}`;
@@ -206,7 +233,8 @@ class AuthController {
         },
         './template/requestResetPassword.handlebars'
       );
-      return res.status(200).json({
+      logger.info(`Password reset link sent to ${customer.email}`);
+      return res.status(HttpStatus.OK).json({
         status: 'success',
         message: `password reset link sent to ${customer.email}`,
       });
@@ -219,16 +247,20 @@ class AuthController {
     try {
       const { token, id } = req.query;
       if (!id) {
-        return next(new AppError('Something went wrong', 500));
+        return next(new AppError('Something went wrong. Missing customer ID', HttpStatus.BAD_REQUEST));
       }
       if (!token) {
-        return next(new AppError('Invalid request. Please provide token', 400));
+        return next(new AppError('Invalid request. Please provide token', HttpStatus.BAD_REQUEST));
       }
-      return res.status(200).json({
+      const storedToken = redisClient.get(`Reset_${id.toString()}`);
+      if (!storedToken || token.toString() !== storedToken) return next(new AppError('Invalid or expired token', HttpStatus.BAD_REQUEST));
+
+      logger.info(`Confirm reset password request for <${id}>, Redirecting to reset password`);
+      return res.status(HttpStatus.OK).json({
         status: 'success',
         id,
         token,
-        message: 'Redirect to /resetpassword/:token to provide new password',
+        message: `Redirect to <a href="${process.env.BASE_URL}/resetpassword/:token?id=${id}">reset password</a>, then provide new password`,
       });
     } catch (err) {
       return next(err);
@@ -240,23 +272,21 @@ class AuthController {
       const { newPassword, passwordConfirmation } = req.body;
 
       if (!newPassword || newPassword.length < 8) {
-        return next(new AppError('Kindly, provide a valid password', 400));
+        return next(new AppError('Invalid new password', HttpStatus.BAD_REQUEST));
       }
       if (!passwordConfirmation) {
         return next(
-          new AppError('Kindly, provide a confirmation password', 400)
+          new AppError('Missing password confirmation', HttpStatus.BAD_REQUEST)
         );
       }
       const storedToken = await redisClient.get(
         `Reset_${req.query.id.toString()}`
       );
       if (!storedToken) {
-        return next(
-          new AppError('Invalid or expired password reset token.', 400)
-        );
+
       }
       if (newPassword !== passwordConfirmation) {
-        return next(new AppError('Passwords are not the same!', 400));
+        return next(new AppError('Passwords do not match', HttpStatus.BAD_REQUEST));
       }
       await Customer.updateOne(
         { _id: req.query.id },
@@ -272,9 +302,10 @@ class AuthController {
         { name: customer.firstName },
         '../helpers/template/resetPassword.handlebars'
       );
-      await redisClient.del(req.query.id.toString());
+      await redisClient.del(`Reset_${req.query.id.toString()}`);
 
-      return res.status(200).json({
+      logger.info('Reset password request: Password reset successfully');
+      return res.status(HttpStatus.OK).json({
         status: 'success',
         message: 'Password reset successfully.',
       });
@@ -290,22 +321,22 @@ class AuthController {
         new ObjectId(req.user.id)
       ).select('+password');
 
-      if (!customer) return next(new AppError('Forbidden', 403));
+      if (!customer) return next(new AppError('Forbidden', HttpStatus.FORBIDDEN));
       if (!currentPassword || !newPassword) {
-        return next(new AppError('current and/or new password missing', 400));
+        return next(new AppError('current and/or new password missing', HttpStatus.BAD_REQUEST));
       }
       if (newPassword.length < 8) {
-        return next(new AppError('Kindly, provide a valid password', 400));
+        return next(new AppError('Kindly, provide a valid password', HttpStatus.BAD_REQUEST));
       }
       if (customer.password !== sha1(currentPassword)) {
-        return next(new AppError('Incorrect current password', 400));
+        return next(new AppError('Incorrect current password', HttpStatus.BAD_REQUEST));
       }
 
       customer.password = newPassword;
       customer.passwordConfirmation = newPasswordConfirmation;
       await customer.save();
-
-      return res.status(200).json({
+      logger.info('Update password request: Password update successful');
+      return res.status(HttpStatus.OK).json({
         status: 'success',
         message: 'password update successful',
       });
