@@ -6,7 +6,7 @@
   "scripts": {
     "lint": "./node_modules/.bin/eslint",
     "check-lint": "lint [0-9]*.js",
-    "start-server": "NODE_ENV=production nodemon --exec babel-node --presets @babel/preset-env ./server.js",
+    "start-server": "nodemon --exec babel-node --presets @babel/preset-env ./server.js > server.txt",
     "dev": "nodemon --exec babel-node --presets @babel/preset-env",
     "test": "echo testing...",
     "release": "release-it"
@@ -22,7 +22,9 @@
     "bullmq": "^3.10.1",
     "chai-http": "^4.3.0",
     "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
     "crypto": "^1.0.1",
+    "datadog-winston": "^1.5.1",
     "dotenv": "^16.0.3",
     "express": "^4.17.1",
     "express-mongo-sanitize": "^2.2.0",
@@ -39,10 +41,14 @@
     "redis": "^2.8.0",
     "release-it": "^15.8.0",
     "sha1": "^1.1.1",
+    "swagger-ui-express": "^4.6.2",
     "twilio": "^4.8.0",
     "uuid": "^9.0.0",
     "validator": "^13.9.0",
-    "xss-clean": "^0.1.1"
+    "winston": "^3.8.2",
+    "winston-daily-rotate-file": "^4.7.1",
+    "xss-clean": "^0.1.1",
+    "yamljs": "^0.3.0"
   },
   "devDependencies": {
     "@babel/cli": "^7.8.0",
