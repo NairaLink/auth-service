@@ -1,5 +1,9 @@
 /* eslint-disable comma-dangle */
 /* eslint-disable default-case */
+const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config({ path: path.join(__dirname, '/../.env' )});
+
 const { Worker } = require('bullmq');
 
 const createAccount = require('./accountProcessor');
@@ -24,5 +28,5 @@ const worker = new Worker(
 );
 
 console.info('Worker listening for create account jobs');
-
+console.log(process.env.REDIS_HOST);
 module.exports = worker;

@@ -1,4 +1,6 @@
 import { Queue } from 'bullmq';
+const dotenv = require('dotenv');
+dotenv.config({ path: '../.env' });
 
 const queue = new Queue('account', {
   connection: {

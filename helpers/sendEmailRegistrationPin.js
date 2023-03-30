@@ -3,6 +3,8 @@ const handlebars = require('handlebars');
 const fs = require('fs');
 const path = require('path');
 const { NotificationClient } = require('./notification');
+const dotenv = require('dotenv');
+dotenv.config({ path: path.join(__dirname, '/../.env' )});
 
 const sendEmailRegistrationPin = async (email, subject, payload, template) => {
   const notification = new NotificationClient({

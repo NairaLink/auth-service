@@ -1,5 +1,8 @@
 import { createClient } from 'redis';
 import { promisify } from 'util';
+const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config({ path: path.join(__dirname, '/../.env' )});
 
 class RedisClient {
   constructor() {
